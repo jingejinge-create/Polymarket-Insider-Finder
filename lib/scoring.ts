@@ -1,20 +1,46 @@
-import { Trade, AnalyzedTrade, InsiderScores, WalletProfile } from './types';
+import { PolymarketTrade } from './polymarket';
 
-// Scoring weights - can be adjusted
-const WEIGHTS = {
-  newness: 0.20,
-  concentration: 0.25,
-  timing: 0.15,
-  sizeVsLiquidity: 0.15,
-  winRate: 0.15,
-  specialization: 0.10,
-};
+export interface InsiderScores {
+  newness: number;
+  concentration: number;
+  timing: number;
+  sizeVsLiquidity: number;
+  winRate: number;
+  specialization: number;
+  composite: number;
+}
+
+export interface AnalyzedTrade {
+  id: string;
+  timestamp: string;
+  market: string;
+  marketSlug: string;
+  conditionId: string;
+  side: 'YES' | 'NO';
+  size: number;
+  price: number;
+  wallet: string;
+  txHash?: string;
+  outcome: string;
+  insiderScore: number;
+  scores: InsiderScores;
+  walletAge: number;
+  marketsTraded: number;
+}
+
+// Wallet cache to simulate profile data
+// In production, you'd fetch this from a database
+const walletProfiles = new Map<string, {
+  firstSeen: number;
+  tradesCount: number;
+  marketsTraded: Set<string>;
+  totalVolume: number;
+}>();
 
 /**
  * Calculate Wallet Newness Score (0-100)
- * Fresh wallets with quick Polymarket activity are suspicious
  */
-export function calculateNewnessScore(walletAgeDays: number): number {
+function calculateNewnessScore(walletAgeDays: number): number {
   if (walletAgeDays <= 3) return 100;
   if (walletAgeDays <= 7) return 90;
   if (walletAgeDays <= 14) return 70;
@@ -26,14 +52,9 @@ export function calculateNewnessScore(walletAgeDays: number): number {
 
 /**
  * Calculate Bet Concentration Score (0-100)
- * High concentration in single market suggests conviction/inside info
  */
-export function calculateConcentrationScore(
-  tradeSize: number,
-  walletTotalVolume: number
-): number {
-  if (walletTotalVolume === 0) return 100; // First trade ever
-  
+function calculateConcentrationScore(tradeSize: number, walletTotalVolume: number): number {
+  if (walletTotalVolume === 0) return 100;
   const concentration = tradeSize / walletTotalVolume;
   
   if (concentration >= 0.95) return 100;
@@ -46,202 +67,150 @@ export function calculateConcentrationScore(
 
 /**
  * Calculate Timing Score (0-100)
- * Trades close to market resolution are more suspicious
+ * Without market end date, we use trade recency as a proxy
  */
-export function calculateTimingScore(
-  tradeTimestamp: Date,
-  marketEndDate: Date | null
-): number {
-  if (!marketEndDate) return 30; // Unknown end date, moderate score
+function calculateTimingScore(tradeTimestamp: number): number {
+  const now = Date.now();
+  const hoursAgo = (now - tradeTimestamp) / (1000 * 60 * 60);
   
-  const hoursUntilEnd = (marketEndDate.getTime() - tradeTimestamp.getTime()) / (1000 * 60 * 60);
-  
-  if (hoursUntilEnd < 0) return 10; // Trade after resolution
-  if (hoursUntilEnd <= 6) return 100;
-  if (hoursUntilEnd <= 24) return 90;
-  if (hoursUntilEnd <= 48) return 75;
-  if (hoursUntilEnd <= 72) return 60;
-  if (hoursUntilEnd <= 168) return 40; // 1 week
-  if (hoursUntilEnd <= 720) return 20; // 1 month
-  return 10;
+  // Very recent trades get higher scores (could be acting on fresh info)
+  if (hoursAgo <= 1) return 80;
+  if (hoursAgo <= 6) return 60;
+  if (hoursAgo <= 24) return 40;
+  return 25;
 }
 
 /**
  * Calculate Size vs Liquidity Score (0-100)
- * Large trades relative to market liquidity show confidence
  */
-export function calculateSizeVsLiquidityScore(
-  tradeSize: number,
-  marketLiquidity: number,
-  market24hVolume: number
-): number {
-  // Use the smaller of liquidity and 24h volume for reference
-  const referenceSize = Math.min(
-    marketLiquidity || Infinity,
-    market24hVolume || Infinity
-  );
-  
-  if (referenceSize === Infinity || referenceSize === 0) {
-    // No market data, score based on absolute size
-    if (tradeSize >= 50000) return 90;
-    if (tradeSize >= 25000) return 70;
-    if (tradeSize >= 10000) return 50;
-    if (tradeSize >= 5000) return 30;
-    return 15;
-  }
-  
-  const ratio = tradeSize / referenceSize;
-  
-  if (ratio >= 0.20) return 100; // 20%+ of liquidity
-  if (ratio >= 0.10) return 85;
-  if (ratio >= 0.05) return 65;
-  if (ratio >= 0.02) return 45;
-  if (ratio >= 0.01) return 30;
+function calculateSizeScore(tradeSize: number): number {
+  // Score based on absolute trade size (USDC)
+  if (tradeSize >= 100000) return 100;
+  if (tradeSize >= 50000) return 90;
+  if (tradeSize >= 25000) return 75;
+  if (tradeSize >= 10000) return 60;
+  if (tradeSize >= 5000) return 45;
+  if (tradeSize >= 1000) return 30;
   return 15;
 }
 
 /**
  * Calculate Win Rate Score (0-100)
- * Consistently correct predictions indicate possible inside info
+ * Simulated - in production, you'd track resolved positions
  */
-export function calculateWinRateScore(
-  wins: number,
-  totalResolved: number
-): number {
-  if (totalResolved < 3) return 50; // Not enough data
-  
-  const winRate = wins / totalResolved;
-  
-  if (winRate >= 0.95 && totalResolved >= 5) return 100;
-  if (winRate >= 0.85) return 85;
-  if (winRate >= 0.75) return 70;
-  if (winRate >= 0.65) return 55;
-  if (winRate >= 0.55) return 40;
+function calculateWinRateScore(tradesCount: number): number {
+  // Without historical data, use trade count as proxy
+  // Fewer trades = more likely to be focused/insider
+  if (tradesCount <= 3) return 80;
+  if (tradesCount <= 10) return 60;
+  if (tradesCount <= 25) return 40;
   return 25;
 }
 
 /**
  * Calculate Specialization Score (0-100)
- * Trading only in specific category suggests domain knowledge
  */
-export function calculateSpecializationScore(
-  categoriesTraded: string[],
-  totalMarkets: number
-): number {
-  if (totalMarkets <= 1) return 80; // Single market = high specialization
-  if (categoriesTraded.length === 0) return 50;
-  
-  const uniqueCategories = new Set(categoriesTraded).size;
-  const categoryRatio = uniqueCategories / totalMarkets;
-  
-  if (uniqueCategories === 1 && totalMarkets >= 3) return 90;
-  if (categoryRatio <= 0.2) return 75;
-  if (categoryRatio <= 0.4) return 50;
-  if (categoryRatio <= 0.6) return 30;
+function calculateSpecializationScore(uniqueMarkets: number): number {
+  if (uniqueMarkets <= 1) return 90;
+  if (uniqueMarkets <= 3) return 75;
+  if (uniqueMarkets <= 5) return 55;
+  if (uniqueMarkets <= 10) return 35;
   return 15;
 }
 
 /**
- * Calculate composite insider score from all metrics
+ * Update wallet profile cache with new trade
  */
-export function calculateInsiderScores(params: {
-  walletAgeDays: number;
-  tradeSize: number;
-  walletTotalVolume: number;
-  tradeTimestamp: Date;
-  marketEndDate: Date | null;
-  marketLiquidity: number;
-  market24hVolume: number;
-  wins: number;
-  totalResolved: number;
-  categoriesTraded: string[];
-  totalMarkets: number;
-}): InsiderScores {
-  const newness = calculateNewnessScore(params.walletAgeDays);
-  const concentration = calculateConcentrationScore(params.tradeSize, params.walletTotalVolume);
-  const timing = calculateTimingScore(params.tradeTimestamp, params.marketEndDate);
-  const sizeVsLiquidity = calculateSizeVsLiquidityScore(
-    params.tradeSize,
-    params.marketLiquidity,
-    params.market24hVolume
-  );
-  const winRate = calculateWinRateScore(params.wins, params.totalResolved);
-  const specialization = calculateSpecializationScore(
-    params.categoriesTraded,
-    params.totalMarkets
+function updateWalletProfile(wallet: string, trade: PolymarketTrade) {
+  const existing = walletProfiles.get(wallet) || {
+    firstSeen: trade.timestamp * 1000,
+    tradesCount: 0,
+    marketsTraded: new Set<string>(),
+    totalVolume: 0,
+  };
+  
+  existing.tradesCount++;
+  existing.marketsTraded.add(trade.conditionId);
+  existing.totalVolume += trade.size * trade.price;
+  
+  if (trade.timestamp * 1000 < existing.firstSeen) {
+    existing.firstSeen = trade.timestamp * 1000;
+  }
+  
+  walletProfiles.set(wallet, existing);
+  return existing;
+}
+
+/**
+ * Analyze a real Polymarket trade and calculate insider scores
+ */
+export function analyzeRealTrade(trade: PolymarketTrade): AnalyzedTrade {
+  const wallet = trade.proxyWallet;
+  const profile = updateWalletProfile(wallet, trade);
+  
+  // Calculate wallet age in days
+  const now = Date.now();
+  const walletAgeDays = Math.max(1, Math.floor((now - profile.firstSeen) / (1000 * 60 * 60 * 24)));
+  
+  // Trade size in USDC
+  const tradeSize = trade.size * trade.price;
+  
+  // Calculate all scores
+  const newness = calculateNewnessScore(walletAgeDays);
+  const concentration = calculateConcentrationScore(tradeSize, profile.totalVolume);
+  const timing = calculateTimingScore(trade.timestamp * 1000);
+  const sizeVsLiquidity = calculateSizeScore(tradeSize);
+  const winRate = calculateWinRateScore(profile.tradesCount);
+  const specialization = calculateSpecializationScore(profile.marketsTraded.size);
+  
+  // Weighted composite score
+  const composite = Math.round(
+    newness * 0.20 +
+    concentration * 0.25 +
+    timing * 0.15 +
+    sizeVsLiquidity * 0.15 +
+    winRate * 0.15 +
+    specialization * 0.10
   );
   
-  const composite = Math.round(
-    newness * WEIGHTS.newness +
-    concentration * WEIGHTS.concentration +
-    timing * WEIGHTS.timing +
-    sizeVsLiquidity * WEIGHTS.sizeVsLiquidity +
-    winRate * WEIGHTS.winRate +
-    specialization * WEIGHTS.specialization
-  );
+  // Determine side (YES/NO) from outcome
+  const side: 'YES' | 'NO' = trade.outcome?.toLowerCase().includes('yes') || 
+                             trade.outcomeIndex === 0 ? 'YES' : 'NO';
   
   return {
-    newness,
-    concentration,
-    timing,
-    sizeVsLiquidity,
-    winRate,
-    specialization,
-    composite: Math.min(100, Math.max(0, composite)),
+    id: trade.transactionHash || `${trade.proxyWallet}-${trade.timestamp}`,
+    timestamp: new Date(trade.timestamp * 1000).toISOString(),
+    market: trade.title || 'Unknown Market',
+    marketSlug: trade.slug || '',
+    conditionId: trade.conditionId,
+    side,
+    size: tradeSize,
+    price: trade.price,
+    wallet: wallet,
+    txHash: trade.transactionHash,
+    outcome: trade.outcome || side,
+    insiderScore: Math.min(100, Math.max(0, composite)),
+    scores: {
+      newness,
+      concentration,
+      timing,
+      sizeVsLiquidity,
+      winRate,
+      specialization,
+      composite: Math.min(100, Math.max(0, composite)),
+    },
+    walletAge: walletAgeDays,
+    marketsTraded: profile.marketsTraded.size,
   };
 }
 
 /**
- * Analyze a trade and calculate insider scores
- * Uses simulated wallet data when real data isn't available
+ * Analyze multiple trades
  */
-export function analyzeTrade(
-  trade: Trade,
-  marketInfo?: {
-    endDate?: string;
-    liquidity?: number;
-    volume?: number;
-    category?: string;
-  }
-): AnalyzedTrade {
-  // Simulate wallet profile based on trade characteristics
-  // In production, this would come from actual blockchain data
-  const walletHash = trade.wallet.slice(2, 10);
-  const walletSeed = parseInt(walletHash, 16);
-  
-  // Use wallet address to create deterministic but varied profiles
-  const walletAgeDays = (walletSeed % 365) + 1;
-  const marketsTraded = (walletSeed % 50) + 1;
-  const walletVolume = trade.size * (1 + (walletSeed % 10));
-  const wins = Math.floor((walletSeed % 10) * 0.7);
-  const totalResolved = Math.floor(walletSeed % 10);
-  
-  // Determine categories (simulated)
-  const categories = ['Politics', 'Crypto', 'Sports', 'Entertainment', 'Science'];
-  const numCategories = (walletSeed % 3) + 1;
-  const tradedCategories = categories.slice(0, numCategories);
-  
-  const scores = calculateInsiderScores({
-    walletAgeDays,
-    tradeSize: trade.size,
-    walletTotalVolume: walletVolume,
-    tradeTimestamp: new Date(trade.timestamp),
-    marketEndDate: marketInfo?.endDate ? new Date(marketInfo.endDate) : null,
-    marketLiquidity: marketInfo?.liquidity || 0,
-    market24hVolume: marketInfo?.volume || 0,
-    wins,
-    totalResolved,
-    categoriesTraded: tradedCategories,
-    totalMarkets: marketsTraded,
-  });
-  
-  return {
-    ...trade,
-    insiderScore: scores.composite,
-    scores,
-    walletAge: walletAgeDays,
-    marketsTraded,
-  };
+export function analyzeRealTrades(trades: PolymarketTrade[]): AnalyzedTrade[] {
+  return trades
+    .map(analyzeRealTrade)
+    .sort((a, b) => b.insiderScore - a.insiderScore);
 }
 
 /**
@@ -262,28 +231,12 @@ export function getScoreColors(score: number): { bg: string; text: string; glow:
   
   switch (severity) {
     case 'critical':
-      return {
-        bg: 'bg-red-500/20',
-        text: 'text-red-400',
-        glow: 'shadow-red-500/30 shadow-lg',
-      };
+      return { bg: 'bg-red-500/20', text: 'text-red-400', glow: 'shadow-red-500/30 shadow-lg' };
     case 'high':
-      return {
-        bg: 'bg-orange-500/20',
-        text: 'text-orange-400',
-        glow: '',
-      };
+      return { bg: 'bg-orange-500/20', text: 'text-orange-400', glow: '' };
     case 'medium':
-      return {
-        bg: 'bg-yellow-500/15',
-        text: 'text-yellow-500',
-        glow: '',
-      };
+      return { bg: 'bg-yellow-500/15', text: 'text-yellow-500', glow: '' };
     default:
-      return {
-        bg: 'bg-emerald-500/15',
-        text: 'text-emerald-500',
-        glow: '',
-      };
+      return { bg: 'bg-emerald-500/15', text: 'text-emerald-500', glow: '' };
   }
 }
