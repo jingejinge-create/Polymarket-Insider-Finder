@@ -6,8 +6,22 @@ import { Filters } from '@/components/Filters';
 import { TradeTable } from '@/components/TradeTable';
 import { ScoreBreakdown } from '@/components/ScoreBreakdown';
 import { ScoreBadge } from '@/components/ScoreBadge';
-import { AnalyzedTrade, FilterState, Stats } from '@/lib/types';
-import { generateMockTrades, calculateStats, filterTrades } from '@/lib/mock-data';
+import { AnalyzedTrade, analyzeRealTrades } from '@/lib/scoring';
+import { fetchRealTrades } from '@/lib/polymarket';
+
+interface FilterState {
+  minSize: number;
+  minScore: number;
+  timeRange: '1h' | '6h' | '24h' | '7d' | '30d';
+  side?: 'YES' | 'NO';
+}
+
+interface Stats {
+  totalAnalyzed: number;
+  highScoreCount: number;
+  totalVolume: number;
+  marketsTracked: number;
+}
 
 export default function Home() {
   const [allTrades, setAllTrades] = useState<AnalyzedTrade[]>([]);
@@ -15,6 +29,7 @@ export default function Home() {
   const [isLive, setIsLive] = useState(true);
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   
   const [filters, setFilters] = useState<FilterState>({
     minSize: 0,
@@ -22,57 +37,107 @@ export default function Home() {
     timeRange: '24h',
   });
 
-  // Fetch/generate trades
+  // Fetch real trades from Polymarket
   const fetchTrades = useCallback(async () => {
     try {
-      // In production, this would fetch from the API
-      // For now, we generate realistic mock data
-      const trades = generateMockTrades(75);
-      setAllTrades(trades);
+      setError(null);
+      
+      // Fetch real trades from Polymarket Data API
+      const rawTrades = await fetchRealTrades({
+        limit: 200,
+        minSize: filters.minSize > 0 ? filters.minSize : undefined,
+      });
+      
+      if (rawTrades.length === 0) {
+        // If API fails, show message but don't crash
+        setError('Unable to fetch live data. Showing cached results.');
+        return;
+      }
+      
+      // Analyze trades and calculate insider scores
+      const analyzedTrades = analyzeRealTrades(rawTrades);
+      
+      setAllTrades(analyzedTrades);
       setLastUpdate(new Date());
-    } catch (error) {
-      console.error('Error fetching trades:', error);
+    } catch (err) {
+      console.error('Error fetching trades:', err);
+      setError('Failed to fetch trades. Retrying...');
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [filters.minSize]);
 
   // Initial load
   useEffect(() => {
     fetchTrades();
   }, [fetchTrades]);
 
-  // Live updates
+  // Live updates every 30 seconds
   useEffect(() => {
     if (!isLive) return;
     
     const interval = setInterval(() => {
       fetchTrades();
-    }, 30000); // Update every 30 seconds
+    }, 30000);
     
     return () => clearInterval(interval);
   }, [isLive, fetchTrades]);
 
-  // Filter trades
+  // Filter trades based on user selection
   const filteredTrades = useMemo(() => {
-    return filterTrades(allTrades, filters);
+    const now = Date.now();
+    const timeRangeMs: Record<string, number> = {
+      '1h': 60 * 60 * 1000,
+      '6h': 6 * 60 * 60 * 1000,
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+      '30d': 30 * 24 * 60 * 60 * 1000,
+    };
+    
+    return allTrades.filter(trade => {
+      // Filter by minimum score
+      if (trade.insiderScore < filters.minScore) return false;
+      
+      // Filter by side
+      if (filters.side && trade.side !== filters.side) return false;
+      
+      // Filter by time range
+      const tradeTime = new Date(trade.timestamp).getTime();
+      if (now - tradeTime > timeRangeMs[filters.timeRange]) return false;
+      
+      return true;
+    });
   }, [allTrades, filters]);
 
   // Calculate stats
-  const stats: Stats = useMemo(() => {
-    return calculateStats(allTrades);
-  }, [allTrades]);
-
-  // Handle trade selection
-  const handleSelectTrade = (trade: AnalyzedTrade | null) => {
-    setSelectedTrade(trade);
-  };
+  const stats: Stats = useMemo(() => ({
+    totalAnalyzed: allTrades.length,
+    highScoreCount: allTrades.filter(t => t.insiderScore >= 70).length,
+    totalVolume: allTrades.reduce((sum, t) => sum + t.size, 0),
+    marketsTracked: new Set(allTrades.map(t => t.conditionId)).size,
+  }), [allTrades]);
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
       <Header stats={stats} />
       
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+        {/* Error Banner */}
+        {error && (
+          <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+            <p className="text-yellow-400 text-sm font-mono">{error}</p>
+          </div>
+        )}
+        
+        {/* Live Data Indicator */}
+        <div className="mb-4 flex items-center gap-2">
+          <span className="relative flex h-3 w-3">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+          </span>
+          <span className="text-xs text-green-400 font-mono">LIVE DATA FROM POLYMARKET</span>
+        </div>
+        
         <Filters 
           filters={filters}
           onChange={setFilters}
@@ -87,17 +152,16 @@ export default function Home() {
             {isLoading ? (
               <div className="py-20 text-center">
                 <div className="inline-block w-8 h-8 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mb-4" />
-                <p className="text-gray-500 font-mono text-sm">Loading trades...</p>
+                <p className="text-gray-500 font-mono text-sm">Fetching live trades from Polymarket...</p>
               </div>
             ) : (
               <TradeTable 
                 trades={filteredTrades.slice(0, 25)}
                 selectedId={selectedTrade?.id || null}
-                onSelect={handleSelectTrade}
+                onSelect={(trade) => setSelectedTrade(trade)}
               />
             )}
             
-            {/* Pagination hint */}
             {filteredTrades.length > 25 && (
               <div className="px-4 py-3 border-t border-gray-800 text-center">
                 <span className="text-xs text-gray-500 font-mono">
@@ -126,12 +190,26 @@ export default function Home() {
                 />
                 
                 <div className="mt-6 pt-4 border-t border-gray-800 space-y-3">
-                  <button className="w-full py-2 bg-cyan-500/20 text-cyan-400 rounded font-mono text-sm hover:bg-cyan-500/30 transition border border-cyan-500/30">
-                    View Full Wallet Profile →
-                  </button>
-                  <button className="w-full py-2 bg-gray-800 text-gray-400 rounded font-mono text-sm hover:bg-gray-700 transition border border-gray-700">
-                    View on PolygonScan ↗
-                  </button>
+                  {selectedTrade.txHash && (
+                    <a 
+                      href={`https://polygonscan.com/tx/${selectedTrade.txHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block w-full py-2 bg-gray-800 text-gray-400 rounded font-mono text-sm hover:bg-gray-700 transition border border-gray-700 text-center"
+                    >
+                      View on PolygonScan ↗
+                    </a>
+                  )}
+                  {selectedTrade.marketSlug && (
+                    <a 
+                      href={`https://polymarket.com/event/${selectedTrade.marketSlug}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block w-full py-2 bg-cyan-500/20 text-cyan-400 rounded font-mono text-sm hover:bg-cyan-500/30 transition border border-cyan-500/30 text-center"
+                    >
+                      View Market on Polymarket ↗
+                    </a>
+                  )}
                 </div>
               </>
             ) : (
@@ -177,11 +255,10 @@ export default function Home() {
       <footer className="border-t border-gray-800/50 mt-12 py-6">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 text-center">
           <p className="text-xs text-gray-600 font-mono leading-relaxed">
-            Disclaimer: This tool identifies patterns that MAY indicate insider activity.
-            High scores do not guarantee insider trading. Use for research purposes only.
+            ⚡ Live data from Polymarket Data API • Scores are algorithmic estimates, not guarantees of insider activity
           </p>
           <p className="text-xs text-gray-700 font-mono mt-2">
-            Built for Polymarket intelligence • Not affiliated with Polymarket
+            Built for research purposes • Not affiliated with Polymarket
           </p>
         </div>
       </footer>
