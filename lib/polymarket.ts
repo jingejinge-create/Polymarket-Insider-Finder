@@ -1,20 +1,74 @@
-import { PolymarketTrade, GammaMarket, MarketInfo } from './types';
+// Polymarket API Client - Real Data
+// Uses the public Data API (no authentication required)
 
-const CLOB_API = 'https://clob.polymarket.com';
+const DATA_API = 'https://data-api.polymarket.com';
 const GAMMA_API = 'https://gamma-api.polymarket.com';
 
-// Fetch recent trades from Polymarket CLOB
-export async function fetchRecentTrades(limit: number = 100): Promise<PolymarketTrade[]> {
+export interface PolymarketTrade {
+  proxyWallet: string;
+  side: 'BUY' | 'SELL';
+  asset: string;
+  conditionId: string;
+  size: number;
+  price: number;
+  timestamp: number;
+  title: string;
+  slug: string;
+  icon?: string;
+  eventSlug: string;
+  outcome: string;
+  outcomeIndex: number;
+  name?: string;
+  pseudonym?: string;
+  transactionHash?: string;
+}
+
+export interface GammaMarket {
+  id: string;
+  question: string;
+  conditionId: string;
+  slug: string;
+  outcomes: string;
+  outcomePrices: string;
+  volume: number;
+  liquidity: number;
+  endDate: string;
+  active: boolean;
+  closed: boolean;
+  category?: string;
+}
+
+/**
+ * Fetch recent trades from Polymarket Data API
+ * No authentication required!
+ */
+export async function fetchRealTrades(options?: {
+  limit?: number;
+  minSize?: number;
+}): Promise<PolymarketTrade[]> {
+  const limit = options?.limit || 100;
+  const minSize = options?.minSize || 0;
+  
   try {
-    const response = await fetch(`${CLOB_API}/trades?limit=${limit}`, {
+    // Build URL with query params
+    let url = `${DATA_API}/trades?limit=${limit}&takerOnly=true`;
+    
+    // Filter by minimum USDC size if specified
+    if (minSize > 0) {
+      url += `&filterType=CASH&filterAmount=${minSize}`;
+    }
+    
+    const response = await fetch(url, {
       headers: {
         'Accept': 'application/json',
       },
-      next: { revalidate: 30 }, // Cache for 30 seconds
+      // Next.js caching - revalidate every 30 seconds
+      next: { revalidate: 30 },
     });
     
     if (!response.ok) {
-      throw new Error(`CLOB API error: ${response.status}`);
+      console.error(`Data API error: ${response.status}`);
+      return [];
     }
     
     const data = await response.json();
@@ -25,47 +79,84 @@ export async function fetchRecentTrades(limit: number = 100): Promise<Polymarket
   }
 }
 
-// Fetch market information
-export async function fetchMarkets(limit: number = 100, active: boolean = true): Promise<GammaMarket[]> {
+/**
+ * Fetch trades for a specific wallet
+ */
+export async function fetchWalletTrades(walletAddress: string, limit: number = 50): Promise<PolymarketTrade[]> {
+  try {
+    const url = `${DATA_API}/trades?user=${walletAddress}&limit=${limit}`;
+    
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      next: { revalidate: 60 },
+    });
+    
+    if (!response.ok) return [];
+    
+    return await response.json() || [];
+  } catch (error) {
+    console.error('Error fetching wallet trades:', error);
+    return [];
+  }
+}
+
+/**
+ * Fetch trades for a specific market
+ */
+export async function fetchMarketTrades(conditionId: string, limit: number = 100): Promise<PolymarketTrade[]> {
+  try {
+    const url = `${DATA_API}/trades?market=${conditionId}&limit=${limit}`;
+    
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      next: { revalidate: 30 },
+    });
+    
+    if (!response.ok) return [];
+    
+    return await response.json() || [];
+  } catch (error) {
+    console.error('Error fetching market trades:', error);
+    return [];
+  }
+}
+
+/**
+ * Fetch active markets from Gamma API
+ */
+export async function fetchMarkets(limit: number = 100): Promise<GammaMarket[]> {
   try {
     const response = await fetch(
-      `${GAMMA_API}/markets?limit=${limit}&active=${active}&closed=false`,
+      `${GAMMA_API}/markets?limit=${limit}&active=true&closed=false`,
       {
-        headers: {
-          'Accept': 'application/json',
-        },
-        next: { revalidate: 60 }, // Cache for 1 minute
+        headers: { 'Accept': 'application/json' },
+        next: { revalidate: 120 },
       }
     );
     
-    if (!response.ok) {
-      throw new Error(`Gamma API error: ${response.status}`);
-    }
+    if (!response.ok) return [];
     
-    const data = await response.json();
-    return data || [];
+    return await response.json() || [];
   } catch (error) {
     console.error('Error fetching markets:', error);
     return [];
   }
 }
 
-// Fetch specific market by condition ID
+/**
+ * Fetch market by condition ID
+ */
 export async function fetchMarketByConditionId(conditionId: string): Promise<GammaMarket | null> {
   try {
     const response = await fetch(
       `${GAMMA_API}/markets?condition_id=${conditionId}`,
       {
-        headers: {
-          'Accept': 'application/json',
-        },
-        next: { revalidate: 60 },
+        headers: { 'Accept': 'application/json' },
+        next: { revalidate: 120 },
       }
     );
     
-    if (!response.ok) {
-      return null;
-    }
+    if (!response.ok) return null;
     
     const data = await response.json();
     return data?.[0] || null;
@@ -73,80 +164,4 @@ export async function fetchMarketByConditionId(conditionId: string): Promise<Gam
     console.error('Error fetching market:', error);
     return null;
   }
-}
-
-// Fetch trades for a specific market
-export async function fetchMarketTrades(assetId: string, limit: number = 50): Promise<PolymarketTrade[]> {
-  try {
-    const response = await fetch(
-      `${CLOB_API}/trades?asset_id=${assetId}&limit=${limit}`,
-      {
-        headers: {
-          'Accept': 'application/json',
-        },
-        next: { revalidate: 30 },
-      }
-    );
-    
-    if (!response.ok) {
-      throw new Error(`CLOB API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    return data || [];
-  } catch (error) {
-    console.error('Error fetching market trades:', error);
-    return [];
-  }
-}
-
-// Get orderbook for price context
-export async function fetchOrderbook(tokenId: string) {
-  try {
-    const response = await fetch(`${CLOB_API}/book?token_id=${tokenId}`, {
-      headers: {
-        'Accept': 'application/json',
-      },
-      next: { revalidate: 10 },
-    });
-    
-    if (!response.ok) {
-      return null;
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error('Error fetching orderbook:', error);
-    return null;
-  }
-}
-
-// Parse market info from Gamma API response
-export function parseMarketInfo(market: GammaMarket): MarketInfo {
-  return {
-    id: market.id,
-    question: market.question,
-    slug: market.slug,
-    outcomes: market.outcomes || ['Yes', 'No'],
-    outcomePrices: (market.outcomePrices || []).map(p => parseFloat(String(p))),
-    volume: market.volume || 0,
-    liquidity: market.liquidity || 0,
-    endDate: market.endDate,
-    resolved: market.closed,
-    category: market.category,
-  };
-}
-
-// Build market lookup from condition ID to market info
-export async function buildMarketLookup(): Promise<Map<string, MarketInfo>> {
-  const markets = await fetchMarkets(500, true);
-  const lookup = new Map<string, MarketInfo>();
-  
-  for (const market of markets) {
-    if (market.conditionId) {
-      lookup.set(market.conditionId, parseMarketInfo(market));
-    }
-  }
-  
-  return lookup;
 }
